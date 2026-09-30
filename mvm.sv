@@ -34,11 +34,37 @@ module mvm # (
 
 /******* Your code starts here *******/
 
+// Overview
+// --------
+// ctrl issues one (vec_raddr, mat_raddr) per cycle. All NUM_OLANES lanes read
+// the same address from their own matrix memory and multiply it by the shared
+// vector word (8 elements), then accumulate over the words of a row.
+//
+// Lanes are handled in pairs (even/odd) so that one DSP computes two 8x8
+// products per cycle (see the "pair" generate block). Vector data and the
+// matrix read address are fanned out through registered trees
+// (1 -> NUM_L1 -> NUM_GROUPS -> NUM_PAIRS) to meet timing across the chip.
+//
+// Timing (cycle 0 = ctrl outputs a word; every stage below is one register):
+//   vec : r_vec_raddr 1, r_vec_raddr2 2, BRAM 3-4, r_vec_l0 5, r_vec_l1 6,
+//         r_vec_l2 7, r_vecp 8, r_b1 9, r_b2 10
+//   mat : r_mat_raddr 1, r_mat_raddr1q 2, r_mat_raddr2 3, r_mat_raddr3 4,
+//         mem 5-6, r_w*2 7, r_w*3 8, r_a1/r_d1 9, r_ad 10
+//   dsp : r_m 11, r_p 12, r_pa/r_pb 13, r_qa/r_qb 14, r_sa/r_sb 15
+//   ctl : *_pipe[12] 13, r_*_g 14, r_*_p 15  -> accum inputs at cycle 15
+//   out : accum ovalid 16
+// Both paths deliver data at cycle 8: the vec path spends its cycles on
+// fanout registers after the memory, the mat path fans out the address
+// before the memory. r_b2 delays b one cycle to match the pre-adder (r_ad).
+// If you add or remove any stage, rebalance the control tap (PIPE_DEPTH-3).
+
 localparam PIPE_DEPTH = 15;
 localparam GROUP_SIZE = 16;
 localparam NUM_GROUPS = (NUM_OLANES + GROUP_SIZE - 1) / GROUP_SIZE;
 localparam NUM_L1 = (NUM_GROUPS + 3) / 4;
 localparam NUM_PAIRS = NUM_OLANES / 2;
+// Matrix memory primitive per pair: first BRAM_PAIRS use block RAM, the next
+// URAM_PAIRS use UltraRAM, the rest use LUTRAM. Tuned to the device budget.
 localparam BRAM_PAIRS = 71;
 localparam URAM_PAIRS = 32;
 
@@ -152,6 +178,11 @@ always_ff @(posedge clk) begin
     end
 end
 
+// Control shift registers: bit k holds the ctrl signal delayed k+1 cycles.
+// Only bit PIPE_DEPTH-3 feeds the datapath; the upper bits exist so that
+// o_busy stays high while words are still in flight.
+
+// Fanout tree level 1: one copy per 4 groups
 genvar j;
 generate
 for (j = 0; j < NUM_L1; j = j + 1) begin : vtree
@@ -165,6 +196,8 @@ endgenerate
 genvar q;
 generate
 for (q = 0; q < NUM_GROUPS; q = q + 1) begin : grp
+
+    // Fanout tree level 2: one copy per group of GROUP_SIZE lanes
 
     always_ff @(posedge clk) begin
         r_mat_raddr2[q] <= r_mat_raddr1q[q/4];
@@ -189,6 +222,18 @@ endgenerate
 genvar p;
 generate
 for (p = 0; p < NUM_PAIRS; p = p + 1) begin : pair
+
+    // One pair = output lanes 2p (even, "e", memory -> d) and 2p+1 (odd,
+    // "o", memory -> a). Both share the vector element b.
+    //
+    // DSP packing (assumes IWIDTH = 8, DSP48E2 27x18 multiplier):
+    //   ad = (a << 18) + d               27-bit pre-adder
+    //   m  = ad * b = (a*b << 18) + d*b
+    //   m[17:0]  (signed) = d*b           exact, since |d*b| <= 2^14
+    //   m[37:18] (signed) = a*b - m[17]   the low half borrows 1 when d*b < 0
+    // So the even lane sums the low halves, and the odd lane sums the high
+    // halves plus r_corr = number of negative low products.
+    // Adder widths grow by 1 bit per tree level (18->19->20->22, 20->21->22->24).
 
     localparam GRP = (2 * p) / GROUP_SIZE;
 
@@ -322,6 +367,7 @@ for (p = 0; p < NUM_PAIRS; p = p + 1) begin : pair
         end
     end
 
+    // Fanout level 3 (per pair) and two registers on the memory outputs
     always_ff @(posedge clk) begin
         r_mat_raddr3 <= r_mat_raddr2[GRP];
         r_we2 <= mat_dout_e;
@@ -331,6 +377,8 @@ for (p = 0; p < NUM_PAIRS; p = p + 1) begin : pair
         r_vecp <= r_vec_l2[GRP];
     end
 
+    // DSP pipeline: A/B/D input regs -> pre-adder (AD) -> M -> P,
+    // then a 3-level adder tree for each half
     always_ff @(posedge clk) begin
         for (i = 0; i < 8; i = i + 1) begin
             r_b1[i] <= r_vecp[i*IWIDTH +: IWIDTH];
@@ -390,6 +438,7 @@ for (p = 0; p < NUM_PAIRS; p = p + 1) begin : pair
 end
 endgenerate
 
+// All lanes run in lockstep, so lane 0 is representative
 assign o_valid = accum_ovalid[0];
 assign o_busy = ctrl_busy || (|valid_pipe) || accum_ovalid[0];
 

@@ -20,6 +20,10 @@ module accum # (
 
 /******* Your code starts here *******/
 
+// first: load data (start a new row); otherwise add to the running sum.
+// ovalid pulses one cycle after the input marked last, with the final sum.
+// r_acc has no reset: it is only observed when ovalid is high.
+
 logic signed [ACCUMW-1:0] r_acc;
 logic r_ovalid;
 

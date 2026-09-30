@@ -28,80 +28,91 @@ module ctrl # (
 
 /******* Your code starts here *******/
 
-localparam IDLE = 1'b0;
+// Walks vec_num_words vector words for each of mat_num_rows_per_olane rows.
+// Every cycle in COMPUTE issues one (vec_raddr, mat_raddr) pair:
+//   - mat_raddr increments every cycle (matrix rows are stored back to back)
+//   - vec_raddr increments within a row, then rewinds to vec_start_addr
+// accum_first / accum_last mark the first/last word of each row.
+// All outputs are registered.
+
+localparam IDLE    = 1'b0;
 localparam COMPUTE = 1'b1;
 
 logic state;
+
+// Job parameters, captured while IDLE. Counts are stored as (n - 2) so the
+// "last" flags can be computed one cycle early from registered compares.
 logic [VEC_ADDRW-1:0] r_vec_start;
 logic [VEC_SIZEW-1:0] r_words_m2;
 logic [MAT_SIZEW-1:0] r_rows_m2;
-logic r_words_is1;
+logic                 r_words_is1;
+
+// Position within the job
 logic [VEC_SIZEW-1:0] word_idx;
 logic [MAT_SIZEW-1:0] row_idx;
+logic                 r_row_last;
+
+// Output registers
 logic [VEC_ADDRW-1:0] r_vec_raddr;
 logic [MAT_ADDRW-1:0] r_mat_raddr;
-logic r_first;
-logic r_last;
-logic r_row_last;
-logic r_ovalid;
-logic r_busy;
+logic                 r_first;
+logic                 r_last;
 
 always_ff @(posedge clk) begin
     if (rst) begin
-        state <= IDLE;
+        state   <= IDLE;
         r_first <= 1'b0;
-        r_last <= 1'b0;
-        r_ovalid <= 1'b0;
-        r_busy <= 1'b0;
+        r_last  <= 1'b0;
     end else if (state == IDLE) begin
         r_vec_start <= vec_start_addr;
-        r_words_m2 <= vec_num_words - 'd2;
-        r_rows_m2 <= mat_num_rows_per_olane - 'd2;
+        r_words_m2  <= vec_num_words - 'd2;
+        r_rows_m2   <= mat_num_rows_per_olane - 'd2;
         r_words_is1 <= (vec_num_words == 'd1);
         if (start) begin
-            state <= COMPUTE;
+            state       <= COMPUTE;
             r_vec_raddr <= vec_start_addr;
             r_mat_raddr <= mat_start_addr;
-            word_idx <= 'd0;
-            row_idx <= 'd0;
-            r_first <= 1'b1;
-            r_last <= (vec_num_words == 'd1);
-            r_row_last <= (mat_num_rows_per_olane == 'd1);
-            r_ovalid <= 1'b1;
-            r_busy <= 1'b1;
+            word_idx    <= 'd0;
+            row_idx     <= 'd0;
+            r_first     <= 1'b1;
+            r_last      <= (vec_num_words == 'd1);
+            r_row_last  <= (mat_num_rows_per_olane == 'd1);
         end
-    end else begin
+    end else begin // COMPUTE
         r_mat_raddr <= r_mat_raddr + 'd1;
         if (r_last) begin
             if (r_row_last) begin
-                state <= IDLE;
+                // Just issued the last word of the last row: done
+                state   <= IDLE;
                 r_first <= 1'b0;
-                r_last <= 1'b0;
-                r_ovalid <= 1'b0;
-                r_busy <= 1'b0;
+                r_last  <= 1'b0;
             end else begin
-                row_idx <= row_idx + 'd1;
-                word_idx <= 'd0;
+                // Next row: rewind the vector
+                row_idx     <= row_idx + 'd1;
+                word_idx    <= 'd0;
                 r_vec_raddr <= r_vec_start;
-                r_first <= 1'b1;
-                r_last <= r_words_is1;
-                r_row_last <= (row_idx == r_rows_m2);
+                r_first     <= 1'b1;
+                r_last      <= r_words_is1;
+                r_row_last  <= (row_idx == r_rows_m2);
             end
         end else begin
-            word_idx <= word_idx + 'd1;
+            // Next word in the same row
+            word_idx    <= word_idx + 'd1;
             r_vec_raddr <= r_vec_raddr + 'd1;
-            r_first <= 1'b0;
-            r_last <= (word_idx == r_words_m2);
+            r_first     <= 1'b0;
+            r_last      <= (word_idx == r_words_m2);
         end
     end
 end
 
-assign vec_raddr = r_vec_raddr;
-assign mat_raddr = r_mat_raddr;
+assign vec_raddr   = r_vec_raddr;
+assign mat_raddr   = r_mat_raddr;
 assign accum_first = r_first;
-assign accum_last = r_last;
-assign ovalid = r_ovalid;
-assign busy = r_busy;
+assign accum_last  = r_last;
+// ovalid and busy were separate registers that always equaled
+// (state == COMPUTE); state is itself a register, so this is identical.
+assign ovalid      = (state == COMPUTE);
+assign busy        = (state == COMPUTE);
 
 /******* Your code ends here ********/
 

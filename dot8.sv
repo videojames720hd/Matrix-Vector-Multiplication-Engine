@@ -19,6 +19,10 @@ module dot8 # (
 
 /******* Your code starts here *******/
 
+// Standalone 8-lane dot product, latency 7:
+// in regs 1, 2 -> multiply 3 -> product reg 4 -> adder tree 5, 6, 7.
+// Not instantiated by mvm, which uses its own packed two-lane DSP pipeline.
+
 localparam VALID_DEPTH = 7;
 
 logic signed [IWIDTH-1:0] r_vec0 [0:7];
